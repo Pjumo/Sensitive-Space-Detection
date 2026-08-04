@@ -21,7 +21,6 @@ static ssize_t pir_read(struct file *file,
 static const struct file_operations pir_fops = {
     .owner = THIS_MODULE,
     .read = pir_read,
-    .llseek = no_llseek,
 };
 
 static struct miscdevice pir_device = {
