@@ -1,21 +1,27 @@
-# CC는 기본값을 gcc로 두되, 밖에서 오버라이드 가능하게 만듦.
-# 예: make CC=aarch64-linux-gnu-gcc  ← 이렇게 부르면 크로스컴파일러로 교체됨
 CC ?= gcc
-
 CFLAGS = -Wall -Wextra -I../../common/include
 
-TARGET = sensor_agent
-SRCS = sensor_agent.c mock/mock_backend.c
+AGENT_TARGET = sensor_agent
+AGENT_SRCS = sensor_agent.c mock/mock_backend.c
 
-all: $(TARGET)
+CLIENT_TARGET = sensor_agent_client
+CLIENT_SRCS = sensor_agent_client.c mock/mock_backend.c
 
-$(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS)
+all: $(AGENT_TARGET) $(CLIENT_TARGET)
 
-run: $(TARGET)
-	./$(TARGET)
+$(AGENT_TARGET): $(AGENT_SRCS)
+	$(CC) $(CFLAGS) -o $(AGENT_TARGET) $(AGENT_SRCS)
+
+$(CLIENT_TARGET): $(CLIENT_SRCS)
+	$(CC) $(CFLAGS) -o $(CLIENT_TARGET) $(CLIENT_SRCS)
+
+run-agent: $(AGENT_TARGET)
+	./$(AGENT_TARGET)
+
+run-client: $(CLIENT_TARGET)
+	./$(CLIENT_TARGET) $(ARGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(AGENT_TARGET) $(CLIENT_TARGET)
 
-.PHONY: all run clean
+.PHONY: all run-agent run-client clean
