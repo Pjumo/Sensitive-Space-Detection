@@ -6,7 +6,7 @@
 
 /* static: 이 파일(mock_backend.c) 안에서만 쓰는 전역변수.
    real_backend.c를 나중에 만들어도 서로 이름이 겹칠 걱정이 없음 */
-static uint32_t seq_counter = 0;
+static __u32 seq_counter = 0;
 
 int mock_backend_init(void)
 {
@@ -30,7 +30,7 @@ int mock_backend_read(struct presence_event *ev)
     ev->sensor_type  = PRESENCE_SENSOR_PIR;
     ev->event_type   = PRESENCE_EVENT_DETECTED;
     ev->sequence     = seq_counter++;
-    ev->timestamp_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    ev->timestamp_ns = (__u64)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
     ev->raw_value    = 1;   /* 실제 PIR이면 GPIO 값, mock에서는 그냥 1(HIGH)로 고정 */
     ev->reserved     = 0;
 

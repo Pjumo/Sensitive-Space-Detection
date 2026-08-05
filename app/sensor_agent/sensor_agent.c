@@ -20,7 +20,7 @@ static void print_event(const struct presence_event *ev)
 int main(void)
 {
     struct presence_event ev;
-    uint64_t last_event_ns = 0;
+    __u64 last_event_ns = 0;
     int occupied = 0;
 
     /* 지금은 mock_backend_*를 직접 호출.
@@ -42,7 +42,7 @@ int main(void)
 
         if (ev.event_type == PRESENCE_EVENT_DETECTED) {
             if (last_event_ns != 0) {
-                uint64_t gap_ns = ev.timestamp_ns - last_event_ns;
+                __u64 gap_ns = ev.timestamp_ns - last_event_ns;
                 double gap_sec = gap_ns / 1000000000.0;
 
                 if (occupied && gap_sec > OCCUPANCY_TIMEOUT_SEC) {
