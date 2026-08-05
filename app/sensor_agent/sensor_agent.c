@@ -1,20 +1,21 @@
 #include <stdio.h>
 #include "mock/mock_backend.h"
 
-/* 마지막 움직임 감지로부터 이 시간(초)이 지나면 "사람 없음"으로 판단.
-   드라이버가 아니라 여기(앱)에 있으니까, 재빌드 없이 이 숫자만 바꾸면
-   30초든 5분이든 자유롭게 조정 가능 */
 #define OCCUPANCY_TIMEOUT_SEC 5
 
 static void print_event(const struct presence_event *ev)
 {
     const char *type_str =
-        (ev->event_type == PRESENCE_EVENT_DETECTED) ? "DETECTED" :
-        (ev->event_type == PRESENCE_EVENT_CLEARED)  ? "CLEARED"  :
-        (ev->event_type == PRESENCE_EVENT_ERROR)    ? "ERROR"    : "NONE";
+        (ev->event_type == PRESENCE_EVENT_ASSERTED)   ? "ASSERTED"   :
+        (ev->event_type == PRESENCE_EVENT_DEASSERTED) ? "DEASSERTED" :
+        (ev->event_type == PRESENCE_EVENT_ERROR)      ? "ERROR"      : "NONE";
 
     printf("[sensor_agent] seq=%u type=%s raw=%u\n",
            ev->sequence, type_str, ev->raw_value);
+
+    if (ev->flags & PRESENCE_EVENT_FLAG_DROPPED_BEFORE) {
+        printf("[sensor_agent] 경고: 이전 이벤트 일부 유실됨\n");
+    }
 }
 
 int main(void)
@@ -23,8 +24,6 @@ int main(void)
     __u64 last_event_ns = 0;
     int occupied = 0;
 
-    /* 지금은 mock_backend_*를 직접 호출.
-       나중에 real_backend.c가 생기면 이 세 줄의 함수 이름만 바꾸면 됨 */
     if (mock_backend_init() != 0) {
         fprintf(stderr, "backend 초기화 실패\n");
         return 1;
@@ -40,7 +39,7 @@ int main(void)
 
         print_event(&ev);
 
-        if (ev.event_type == PRESENCE_EVENT_DETECTED) {
+        if (ev.event_type == PRESENCE_EVENT_ASSERTED) {
             if (last_event_ns != 0) {
                 __u64 gap_ns = ev.timestamp_ns - last_event_ns;
                 double gap_sec = gap_ns / 1000000000.0;
