@@ -102,15 +102,3 @@ cd /mnt/ubuntu_nfs/Sensitive-Space-Detection/drivers/pir/user
 make clean
 make
 ```
-
-## 9. Git 반영
-
-```bash
-cd /mnt/ubuntu_nfs/Sensitive-Space-Detection
-```
-
-```bash
-git add drivers/pir/src/README.md
-git commit -m "docs: add PIR driver commands"
-git push origin main
-```
