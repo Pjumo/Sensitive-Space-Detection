@@ -6,6 +6,8 @@
 *.mod.o
 *.symvers
 *.order
+*.cmd
+*.dtbo
 .tmp_versions/
 Module.symvers
 
