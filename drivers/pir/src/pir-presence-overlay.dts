@@ -1,0 +1,22 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    fragment@0 {
+        target-path = "/";
+
+        __overlay__ {
+            pir_presence: pir-presence {
+                compatible = "project,pir-presence";
+
+                /*
+                 * BCM GPIO23
+                 * 마지막 0은 GPIO_ACTIVE_HIGH
+                 */
+                pir-gpios = <&gpio 23 0>;
+
+                status = "okay";
+            };
+        };
+    };
+};
