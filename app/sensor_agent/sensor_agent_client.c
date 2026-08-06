@@ -12,9 +12,12 @@
 #define OCCUPANCY_TIMEOUT_SEC 5
 #define MAX_MSG_SIZE 4096
 #define CLIENT_PASSWD "PASSWD"
+#define MIN_SEND_INTERVAL_SEC 1
+#define HEARTBEAT_INTERVAL_SEC 30
 
 static int read_exact(int fd, void *buf, size_t n);
 static int send_msg(int fd, const char *msg);
+static int send_msg_limited(int fd, const char *msg);
 
 int main(int argc, char *argv[])
 {
@@ -105,6 +108,7 @@ int main(int argc, char *argv[])
     int occupied = 0;
     int waiting_for_timeout = 0;
     time_t low_since = 0;
+    time_t last_heartbeat = time(NULL);
 
     while (1) {
         int ret = real_backend_wait_read(&ev, 1000);   /* 1초마다 깨어나서 타이머 체크 */
@@ -125,7 +129,7 @@ int main(int argc, char *argv[])
                     char status_msg[MAX_MSG_SIZE];
                     snprintf(status_msg, sizeof(status_msg),
                              "{\"id\":\"%s\",\"occupied\":true}", client_id);
-                    send_msg(sock, status_msg);
+                    send_msg_limited(sock, status_msg);
                 }
             }
             else if (ev.event_type == PRESENCE_EVENT_DEASSERTED) {
@@ -147,8 +151,21 @@ int main(int argc, char *argv[])
                 char status_msg[MAX_MSG_SIZE];
                 snprintf(status_msg, sizeof(status_msg),
                          "{\"id\":\"%s\",\"occupied\":false}", client_id);
-                send_msg(sock, status_msg);
+                send_msg_limited(sock, status_msg);
             }
+        }
+
+        if (time(NULL) - last_heartbeat >= HEARTBEAT_INTERVAL_SEC) {
+            char heartbeat_msg[MAX_MSG_SIZE];
+            snprintf(heartbeat_msg, sizeof(heartbeat_msg),
+                     "{\"type\":\"heartbeat\",\"id\":\"%s\"}", client_id);
+
+            if (send_msg(sock, heartbeat_msg) != 0) {
+                fprintf(stderr, "[client] heartbeat 전송 실패, 연결 끊김 의심\n");
+                break;
+            }
+
+            last_heartbeat = time(NULL);
         }
     }
 
@@ -169,6 +186,20 @@ static int send_msg(int fd, const char *msg)
         return -1;
     }
     return 0;
+}
+
+static int send_msg_limited(int fd, const char *msg)
+{
+    static time_t last_sent = 0;
+    time_t now = time(NULL);
+
+    if (now - last_sent < MIN_SEND_INTERVAL_SEC) {
+        fprintf(stderr, "[client] rate limit: 메시지 전송 생략 (너무 빠름)\n");
+        return -1;
+    }
+
+    last_sent = now;
+    return send_msg(fd, msg);
 }
 
 static int read_exact(int fd, void *buf, size_t n)
