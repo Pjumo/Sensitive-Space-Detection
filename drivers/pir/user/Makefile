@@ -1,16 +1,30 @@
-CC ?= gcc
+APP = pir_app
+MOD = pir_dev
+OBJ = $(APP).o
+obj-m = $(MOD).o
 
-CPPFLAGS += -I../../../common/include
-CFLAGS += -O2 -Wall -Wextra -Werror -std=c11
+CROSS = ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf-
+CC = arm-linux-gnueabihf-gcc
+KDIR = /home/ubuntu/pi_bsp/kernel/linux
+PWD = $(shell pwd)
+ccflags-y += -I$(PWD)/../../../common/include
 
-TARGET := pir_test
+default:$(OBJ)
+	$(MAKE) -C $(KDIR) M=$(PWD) modules $(CROSS)
+	cp $(MOD).ko /srv/nfs
 
-.PHONY: all clean
-
-all: $(TARGET)
-
-$(TARGET): pir_test.c ../../../common/include/presence_uapi.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ pir_test.c
+%.o:%.c
+	$(CC) -I$(PWD)/../../../common/include -o $(APP) $<
+	cp $(APP) /srv/nfs
 
 clean:
-	$(RM) $(TARGET)
+	rm -rf *.ko
+	rm -rf *.mod.*
+	rm -rf .*.cmd
+	rm -rf *.o
+	rm -rf modules.order
+	rm -rf Module.symvers
+	rm -rf $(MOD).mod
+	rm -rf .tmp_versions
+	rm -rf .module*
+	rm -rf $(APP)
