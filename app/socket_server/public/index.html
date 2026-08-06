@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>재실 감지 대시보드</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #161d2e;
+    --panel-2: #1c2439;
+    --border: #2a3350;
+    --text: #e8ecf6;
+    --text-dim: #8a93ac;
+    --green: #33d17a;
+    --green-dim: #1c4d34;
+    --gray: #5a6480;
+    --red: #e05260;
+    --red-dim: #4d2126;
+    --accent: #5b8cff;
+    --radius: 12px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: "Pretendard", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  header.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  header.topbar h1 {
+    font-size: 18px;
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .ws-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--gray);
+    box-shadow: 0 0 0 3px transparent;
+    transition: background 0.2s;
+  }
+
+  .dot.ok { background: var(--green); box-shadow: 0 0 0 3px var(--green-dim); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 0 3px var(--red-dim); }
+
+  nav.tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 24px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .tab-btn {
+    appearance: none;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 18px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+
+  .tab-btn.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+
+  main {
+    padding: 24px;
+  }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+
+  .summary-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+  }
+
+  .summary-card .value {
+    font-size: 26px;
+    font-weight: 700;
+  }
+
+  .summary-card .label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  .content-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .content-grid { grid-template-columns: 1fr; }
+  }
+
+  h2 {
+    font-size: 14px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0 0 12px;
+  }
+
+  .device-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px;
+  }
+
+  .device-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .device-card::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+    background: var(--gray);
+  }
+
+  .device-card.occupied::before { background: var(--green); }
+  .device-card.offline::before { background: var(--red); }
+
+  .device-card .room-id {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .device-card .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 16px;
+    font-weight: 700;
+    padding: 4px 0;
+  }
+
+  .device-card .status-badge .dot { width: 10px; height: 10px; }
+
+  .device-card .conn-badge {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  .device-card .conn-badge.online { color: var(--green); border-color: var(--green-dim); }
+  .device-card .conn-badge.offline { color: var(--red); border-color: var(--red-dim); }
+
+  .device-card .meta {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .device-card .meta strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .events-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    max-height: 640px;
+    overflow-y: auto;
+  }
+
+  .event-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .event-row:last-child { border-bottom: none; }
+
+  .event-row .icon {
+    width: 16px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .event-row.occupied .icon { color: var(--green); }
+  .event-row.vacant .icon { color: var(--gray); }
+
+  .event-row .time {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .event-row .room {
+    font-weight: 600;
+  }
+
+  .empty-state {
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 24px 8px;
+    text-align: center;
+  }
+
+  .placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 100px 20px;
+    color: var(--text-dim);
+    text-align: center;
+  }
+
+  .placeholder-icon { font-size: 42px; margin-bottom: 12px; }
+  .placeholder h2 { text-transform: none; letter-spacing: normal; font-size: 18px; color: var(--text); }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>재실 감지 대시보드</h1>
+  <div class="ws-status">
+    <span class="dot" id="wsDot"></span>
+    <span id="wsStatusText">연결 중...</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="pir">PIR</button>
+  <button class="tab-btn" data-tab="radar">RADAR</button>
+</nav>
+
+<main>
+  <section id="tab-pir" class="tab-panel active">
+    <div class="summary-row" id="summaryRow"></div>
+
+    <div class="content-grid">
+      <div>
+        <h2>디바이스 상태</h2>
+        <div class="device-grid" id="deviceGrid">
+          <div class="empty-state">아직 연결된 센서가 없습니다.</div>
+        </div>
+      </div>
+
+      <div>
+        <h2>최근 이벤트</h2>
+        <div class="events-panel" id="eventLog">
+          <div class="empty-state">이벤트 대기 중...</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-radar" class="tab-panel">
+    <div class="placeholder">
+      <div class="placeholder-icon">📡</div>
+      <h2>RADAR 대시보드는 준비 중입니다</h2>
+      <p>IWR6843 point cloud 3D 시각화가 이 탭에 추가될 예정입니다.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+/* ---------- 탭 전환 ---------- */
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+/* ---------- 상태 ---------- */
+const devices = new Map(); // id -> {id, occupied, lastEventAt, lastSeenAt, connected}
+let events = []; // 최신이 앞쪽, 최대 100개 유지
+
+/* ---------- 포맷 헬퍼 ---------- */
+function formatClock(ts) {
+  return new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+}
+
+function formatElapsed(ms) {
+  if (ms < 1000) return '방금 전';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}초 전`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}시간 전`;
+  return `${Math.floor(h / 24)}일 전`;
+}
+
+function formatDuration(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}시간 ${m}분`;
+  if (m > 0) return `${m}분 ${s}초`;
+  return `${s}초`;
+}
+
+function sortedDeviceList() {
+  return Array.from(devices.values()).sort((a, b) =>
+    a.id.localeCompare(b.id, undefined, { numeric: true })
+  );
+}
+
+/* ---------- 렌더링 ---------- */
+function renderSummary() {
+  const list = sortedDeviceList();
+  const occupiedCount = list.filter((d) => d.occupied).length;
+  const connectedCount = list.filter((d) => d.connected).length;
+  const lastEventAt = list.reduce(
+    (max, d) => Math.max(max, d.lastEventAt || 0),
+    0
+  );
+
+  const cards = [
+    { label: '전체 디바이스', value: list.length },
+    { label: '재실 중', value: occupiedCount },
+    { label: '센서 연결됨', value: `${connectedCount} / ${list.length}` },
+    { label: '최근 이벤트', value: lastEventAt ? formatElapsed(Date.now() - lastEventAt) : '-' },
+  ];
+
+  document.getElementById('summaryRow').innerHTML = cards
+    .map(
+      (c) => `
+      <div class="summary-card">
+        <div class="value">${c.value}</div>
+        <div class="label">${c.label}</div>
+      </div>`
+    )
+    .join('');
+}
+
+function renderDevices() {
+  const list = sortedDeviceList();
+  const grid = document.getElementById('deviceGrid');
+
+  if (list.length === 0) {
+    grid.innerHTML = '<div class="empty-state">아직 연결된 센서가 없습니다.</div>';
+    return;
+  }
+
+  const now = Date.now();
+
+  grid.innerHTML = list
+    .map((d) => {
+      const cardClass = !d.connected ? 'offline' : d.occupied ? 'occupied' : '';
+      const statusText = d.occupied ? '재실 있음' : '재실 없음';
+      const statusDotClass = d.occupied ? 'ok' : '';
+      const connClass = d.connected ? 'online' : 'offline';
+      const connText = d.connected ? '센서 연결됨' : '센서 연결 끊김';
+      const sinceMs = now - (d.lastEventAt || now);
+
+      return `
+        <div class="device-card ${cardClass}">
+          <div class="room-id">Room ${d.id}</div>
+          <div class="status-badge">
+            <span class="dot ${statusDotClass}"></span>
+            ${statusText}
+          </div>
+          <span class="conn-badge ${connClass}">${connText}</span>
+          <div class="meta">
+            마지막 이벤트: <strong>${formatClock(d.lastEventAt)}</strong> (${formatElapsed(now - d.lastEventAt)})<br />
+            현재 상태 지속: <strong>${formatDuration(sinceMs)}</strong>
+          </div>
+        </div>`;
+    })
+    .join('');
+}
+
+function renderEvents() {
+  const log = document.getElementById('eventLog');
+
+  if (events.length === 0) {
+    log.innerHTML = '<div class="empty-state">이벤트 대기 중...</div>';
+    return;
+  }
+
+  log.innerHTML = events
+    .map((e) => {
+      const cls = e.occupied ? 'occupied' : 'vacant';
+      const icon = e.occupied ? '▲' : '▽';
+      const text = e.occupied ? '재실 시작' : '재실 종료';
+      return `
+        <div class="event-row ${cls}">
+          <span class="icon">${icon}</span>
+          <span class="time">${formatClock(e.ts)}</span>
+          <span class="room">Room ${e.id}</span>
+          <span>${text}</span>
+        </div>`;
+    })
+    .join('');
+}
+
+function renderAll() {
+  renderSummary();
+  renderDevices();
+  renderEvents();
+}
+
+/* 경과 시간/지속 시간은 새 데이터 없이도 흘러가야 하므로 1초마다 재렌더 */
+setInterval(() => {
+  renderSummary();
+  renderDevices();
+}, 1000);
+
+/* ---------- 초기 데이터 로드 ---------- */
+async function loadInitialData() {
+  try {
+    const [devicesRes, eventsRes] = await Promise.all([
+      fetch('/api/devices'),
+      fetch('/api/events?limit=100'),
+    ]);
+
+    const deviceList = await devicesRes.json();
+    deviceList.forEach((d) => devices.set(d.id, d));
+
+    const eventList = await eventsRes.json();
+    events = eventList.slice().reverse(); // 서버는 오래된 순 -> 최신이 앞으로 오게 뒤집음
+
+    renderAll();
+  } catch (err) {
+    console.error('초기 데이터 로드 실패', err);
+  }
+}
+
+/* ---------- WebSocket ---------- */
+let ws = null;
+let reconnectDelay = 1000;
+
+function setWsStatus(connected) {
+  const dot = document.getElementById('wsDot');
+  const text = document.getElementById('wsStatusText');
+  dot.classList.toggle('ok', connected);
+  dot.classList.toggle('bad', !connected);
+  text.textContent = connected ? '브릿지 연결됨' : '연결 끊김 - 재시도 중';
+}
+
+function connectWebSocket() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    setWsStatus(true);
+    reconnectDelay = 1000;
+  };
+
+  ws.onmessage = (msg) => {
+    let payload;
+    try {
+      payload = JSON.parse(msg.data);
+    } catch (err) {
+      return;
+    }
+
+    if (payload.type === 'snapshot') {
+      payload.devices.forEach((d) => devices.set(d.id, d));
+      renderAll();
+      return;
+    }
+
+    if (payload.type === 'event') {
+      events.unshift(payload.event);
+      if (events.length > 100) events.pop();
+      if (payload.device) devices.set(payload.device.id, payload.device);
+      renderAll();
+      return;
+    }
+
+    if (payload.type === 'device-update') {
+      if (payload.device) devices.set(payload.device.id, payload.device);
+      renderDevices();
+      renderSummary();
+    }
+  };
+
+  ws.onclose = () => {
+    setWsStatus(false);
+    setTimeout(connectWebSocket, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+loadInitialData().then(connectWebSocket);
+</script>
+
+</body>
+</html>
