@@ -49,6 +49,18 @@ class SensorStateStore extends EventEmitter {
     this.emit('device-update', device);
   }
 
+  /**
+   * heartbeat 등 "살아있다"는 신호만 받았을 때 occupied/lastEventAt은 건드리지 않고
+   * lastSeenAt만 갱신합니다. 아직 한 번도 occupied 이벤트를 보낸 적 없는 id면
+   * 조용히 무시합니다(대시보드에 반쪽 데이터로 나타나지 않도록).
+   */
+  touch(id) {
+    const device = this._devices.get(id);
+    if (!device) return;
+    device.lastSeenAt = Date.now();
+    this.emit('device-update', device);
+  }
+
   getDevices() {
     return Array.from(this._devices.values());
   }
