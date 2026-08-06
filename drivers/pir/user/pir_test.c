@@ -1,246 +1,363 @@
-#define _GNU_SOURCE
-
-#include <errno.h>
-#include <fcntl.h>
-#include <inttypes.h>
-#include <poll.h>
-#include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <poll.h>
+#include <string.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <sys/sysmacros.h>
 
 #include "presence_uapi.h"
 
-#define PIR_DEVICE_PATH "/dev/pir_presence"
+#define PIR_DEVICE     "/dev/pir_dev"
+#define PIR_DEV_MAJOR  230
+#define PIR_DEV_MINOR  0
 
-static volatile sig_atomic_t stop_requested;
 
-static void handle_signal(int signal_number)
+static int createDeviceNode(void)
 {
-    (void)signal_number;
-    stop_requested = 1;
-}
+        dev_t dev_num;
 
-static const char *event_name(__u32 event_type)
-{
-    switch (event_type) {
-    case PRESENCE_EVENT_ASSERTED:
-        return "ASSERTED";
+        if(access(PIR_DEVICE, F_OK) == 0)
+                return 0;
 
-    case PRESENCE_EVENT_DEASSERTED:
-        return "DEASSERTED";
-
-    case PRESENCE_EVENT_ERROR:
-        return "ERROR";
-
-    default:
-        return "NONE";
-    }
-}
-
-static int print_device_info(int fd)
-{
-    __u32 api_version = 0;
-    struct presence_caps caps = {0};
-    struct presence_state state = {0};
-
-    if (ioctl(
-            fd,
-            PRESENCE_IOC_GET_API_VERSION,
-            &api_version) < 0) {
-        perror("PRESENCE_IOC_GET_API_VERSION");
-        return -1;
-    }
-
-    if (ioctl(
-            fd,
-            PRESENCE_IOC_GET_CAPS,
-            &caps) < 0) {
-        perror("PRESENCE_IOC_GET_CAPS");
-        return -1;
-    }
-
-    if (ioctl(
-            fd,
-            PRESENCE_IOC_GET_STATE,
-            &state) < 0) {
-        perror("PRESENCE_IOC_GET_STATE");
-        return -1;
-    }
-
-    printf("API version  : %u\n", api_version);
-    printf("sensor type  : %u\n", caps.sensor_type);
-    printf("event size   : %u bytes\n", caps.event_size);
-    printf("FIFO depth   : %u events\n", caps.fifo_depth);
-    printf("capabilities : 0x%08x\n",
-           caps.capability_flags);
-    printf("GPIO state   : %u\n", state.raw_value);
-    printf("sequence     : %u\n", state.sequence);
-    printf("waiting for PIR events...\n");
-    printf("press Ctrl+C to stop\n");
-
-    return 0;
-}
-
-static void print_statistics(int fd)
-{
-    struct presence_stats stats = {0};
-
-    if (ioctl(
-            fd,
-            PRESENCE_IOC_GET_STATS,
-            &stats) < 0) {
-        perror("PRESENCE_IOC_GET_STATS");
-        return;
-    }
-
-    printf("\nstatistics\n");
-
-    printf(
-        "  total     : %" PRIu64 "\n",
-        (uint64_t)stats.total_events);
-
-    printf(
-        "  delivered : %" PRIu64 "\n",
-        (uint64_t)stats.delivered_events);
-
-    printf(
-        "  dropped   : %" PRIu64 "\n",
-        (uint64_t)stats.dropped_events);
-
-    printf(
-        "  last time : %" PRIu64 " ns\n",
-        (uint64_t)stats.last_timestamp_ns);
-}
-
-int main(int argc, char **argv)
-{
-    const char *device_path = PIR_DEVICE_PATH;
-    struct sigaction signal_action = {0};
-    int fd;
-
-    if (argc > 2) {
-        fprintf(
-            stderr,
-            "usage: %s [device-path]\n",
-            argv[0]);
-
-        return EXIT_FAILURE;
-    }
-
-    if (argc == 2)
-        device_path = argv[1];
-
-    signal_action.sa_handler = handle_signal;
-    sigemptyset(&signal_action.sa_mask);
-
-    if (sigaction(
-            SIGINT,
-            &signal_action,
-            NULL) < 0) {
-        perror("sigaction SIGINT");
-        return EXIT_FAILURE;
-    }
-
-    if (sigaction(
-            SIGTERM,
-            &signal_action,
-            NULL) < 0) {
-        perror("sigaction SIGTERM");
-        return EXIT_FAILURE;
-    }
-
-    fd = open(
-        device_path,
-        O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-
-    if (fd < 0) {
-        perror(device_path);
-        return EXIT_FAILURE;
-    }
-
-    if (print_device_info(fd) < 0) {
-        close(fd);
-        return EXIT_FAILURE;
-    }
-
-    while (!stop_requested) {
-        struct pollfd poll_descriptor = {
-            .fd = fd,
-            .events = POLLIN,
-        };
-
-        struct presence_event event;
-        ssize_t bytes;
-        int ret;
-
-        ret = poll(&poll_descriptor, 1, 1000);
-
-        if (ret < 0) {
-            if (errno == EINTR)
-                continue;
-
-            perror("poll");
-            break;
+        if(errno != ENOENT)
+        {
+                perror("access");
+                return -1;
         }
 
-        if (ret == 0)
-            continue;
+        dev_num = makedev(
+                PIR_DEV_MAJOR,
+                PIR_DEV_MINOR
+        );
 
-        if (poll_descriptor.revents &
-            (POLLERR | POLLHUP | POLLNVAL)) {
-            fprintf(
-                stderr,
-                "device poll error: revents=0x%x\n",
-                poll_descriptor.revents);
-
-            break;
+        if(mknod(
+                PIR_DEVICE,
+                S_IFCHR |
+                S_IRUSR | S_IWUSR |
+                S_IRGRP | S_IWGRP |
+                S_IROTH | S_IWOTH,
+                dev_num) < 0)
+        {
+                perror("mknod");
+                return -1;
         }
 
-        if (!(poll_descriptor.revents & POLLIN))
-            continue;
+        return 0;
+}
 
-        bytes = read(fd, &event, sizeof(event));
 
-        if (bytes < 0) {
-            if (errno == EAGAIN ||
-                errno == EINTR)
-                continue;
+static const char *sensorTypeToString(__u32 sensor_type)
+{
+        switch(sensor_type)
+        {
+        case PRESENCE_SENSOR_PIR:
+                return "PIR";
 
-            perror("read");
-            break;
+        case PRESENCE_SENSOR_RADAR:
+                return "RADAR";
+
+        default:
+                return "UNKNOWN";
+        }
+}
+
+
+static const char *eventTypeToString(__u32 event_type)
+{
+        switch(event_type)
+        {
+        case PRESENCE_EVENT_NONE:
+                return "NONE";
+
+        case PRESENCE_EVENT_ASSERTED:
+                return "ASSERTED";
+
+        case PRESENCE_EVENT_DEASSERTED:
+                return "DEASSERTED";
+
+        case PRESENCE_EVENT_ERROR:
+                return "ERROR";
+
+        default:
+                return "UNKNOWN";
+        }
+}
+
+
+static void printCapabilities(const struct presence_caps *caps)
+{
+        printf("\n[Capabilities]\n");
+        printf("API version : %u\n", caps->api_version);
+        printf("Sensor      : %s\n",
+               sensorTypeToString(caps->sensor_type));
+        printf("Event size  : %u bytes\n", caps->event_size);
+        printf("FIFO depth  : %u\n", caps->fifo_depth);
+
+        printf("Functions   :");
+
+        if(caps->capability_flags & PRESENCE_CAP_READ)
+                printf(" READ");
+
+        if(caps->capability_flags & PRESENCE_CAP_POLL)
+                printf(" POLL");
+
+        if(caps->capability_flags &
+           PRESENCE_CAP_CURRENT_STATE)
+        {
+                printf(" CURRENT_STATE");
         }
 
-        if ((size_t)bytes != sizeof(event)) {
-            fprintf(
-                stderr,
-                "unexpected event size: %zd\n",
-                bytes);
+        if(caps->capability_flags & PRESENCE_CAP_STATS)
+                printf(" STATS");
 
-            break;
+        if(caps->capability_flags &
+           PRESENCE_CAP_RISING_EDGE)
+        {
+                printf(" RISING_EDGE");
+        }
+
+        if(caps->capability_flags &
+           PRESENCE_CAP_SINGLE_READER)
+        {
+                printf(" SINGLE_READER");
+        }
+
+        printf("\n");
+}
+
+
+static void printState(const struct presence_state *state)
+{
+        printf("\n[Current state]\n");
+        printf("Sensor      : %s\n",
+               sensorTypeToString(state->sensor_type));
+        printf("Raw value   : %u\n", state->raw_value);
+        printf("Sequence    : %u\n", state->sequence);
+        printf("Timestamp   : %llu ns\n",
+               (unsigned long long)
+               state->last_timestamp_ns);
+}
+
+
+static void printEvent(const struct presence_event *event)
+{
+        printf("\n[Presence event]\n");
+        printf("API version : %u\n", event->api_version);
+        printf("Sensor      : %s\n",
+               sensorTypeToString(event->sensor_type));
+        printf("Event       : %s\n",
+               eventTypeToString(event->event_type));
+        printf("Sequence    : %u\n", event->sequence);
+        printf("Timestamp   : %llu ns\n",
+               (unsigned long long)
+               event->timestamp_ns);
+        printf("Raw value   : %u\n", event->raw_value);
+
+        if(event->flags &
+           PRESENCE_EVENT_FLAG_DROPPED_BEFORE)
+        {
+                printf("Warning     : previous event dropped\n");
+        }
+}
+
+
+static void printStats(int fd)
+{
+        struct presence_stats stats;
+
+        memset(&stats, 0, sizeof(stats));
+
+        if(ioctl(
+                fd,
+                PRESENCE_IOC_GET_STATS,
+                &stats) < 0)
+        {
+                perror("ioctl(GET_STATS)");
+                return;
         }
 
         printf(
-            "event seq=%u type=%s raw=%u "
-            "time=%" PRIu64 " ns flags=0x%08x%s\n",
-            event.sequence,
-            event_name(event.event_type),
-            event.raw_value,
-            (uint64_t)event.timestamp_ns,
-            event.flags,
-            (event.flags &
-             PRESENCE_EVENT_FLAG_DROPPED_BEFORE)
-                ? " [older event dropped]"
-                : "");
+                "Stats: total=%llu, delivered=%llu, "
+                "dropped=%llu\n",
+                (unsigned long long)stats.total_events,
+                (unsigned long long)stats.delivered_events,
+                (unsigned long long)stats.dropped_events
+        );
+}
 
-        fflush(stdout);
-    }
 
-    print_statistics(fd);
+int main(void)
+{
+        int fd;
+        int ret;
+        __u32 api_version;
 
-    close(fd);
+        struct presence_caps caps;
+        struct presence_state state;
+        struct presence_event event;
+        struct pollfd pfd;
 
-    return EXIT_SUCCESS;
+        ssize_t read_size;
+
+        if(createDeviceNode() < 0)
+                return 1;
+
+        fd = open(
+                PIR_DEVICE,
+                O_RDONLY | O_NONBLOCK
+        );
+
+        if(fd < 0)
+        {
+                perror("open");
+                return 1;
+        }
+
+        api_version = 0;
+
+        if(ioctl(
+                fd,
+                PRESENCE_IOC_GET_API_VERSION,
+                &api_version) < 0)
+        {
+                perror("ioctl(GET_API_VERSION)");
+                close(fd);
+                return 1;
+        }
+
+        printf("Presence API version: %u\n", api_version);
+
+        memset(&caps, 0, sizeof(caps));
+
+        if(ioctl(
+                fd,
+                PRESENCE_IOC_GET_CAPS,
+                &caps) < 0)
+        {
+                perror("ioctl(GET_CAPS)");
+                close(fd);
+                return 1;
+        }
+
+        printCapabilities(&caps);
+
+        if(caps.event_size != sizeof(struct presence_event))
+        {
+                fprintf(
+                        stderr,
+                        "Event size mismatch: driver=%u app=%zu\n",
+                        caps.event_size,
+                        sizeof(struct presence_event)
+                );
+
+                close(fd);
+                return 1;
+        }
+
+        memset(&state, 0, sizeof(state));
+
+        if(ioctl(
+                fd,
+                PRESENCE_IOC_GET_STATE,
+                &state) < 0)
+        {
+                perror("ioctl(GET_STATE)");
+                close(fd);
+                return 1;
+        }
+
+        printState(&state);
+
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        printf("\nWaiting for PIR events...\n");
+        printf("Press Ctrl+C to exit\n");
+
+        while(1)
+        {
+                ret = poll(&pfd, 1, -1);
+
+                if(ret < 0)
+                {
+                        if(errno == EINTR)
+                                continue;
+
+                        perror("poll");
+                        break;
+                }
+
+                if(pfd.revents &
+                   (POLLERR | POLLHUP | POLLNVAL))
+                {
+                        fprintf(
+                                stderr,
+                                "poll error: revents=0x%x\n",
+                                pfd.revents
+                        );
+
+                        break;
+                }
+
+                if(pfd.revents & POLLIN)
+                {
+                        /*
+                         * FIFO에 여러 이벤트가 있을 수 있으므로
+                         * EAGAIN이 나올 때까지 모두 읽습니다.
+                         */
+                        while(1)
+                        {
+                                read_size = read(
+                                        fd,
+                                        &event,
+                                        sizeof(event)
+                                );
+
+                                if(read_size < 0)
+                                {
+                                        if(errno == EAGAIN ||
+                                           errno == EWOULDBLOCK)
+                                        {
+                                                break;
+                                        }
+
+                                        if(errno == EINTR)
+                                                continue;
+
+                                        perror("read");
+                                        close(fd);
+                                        return 1;
+                                }
+
+                                if(read_size != sizeof(event))
+                                {
+                                        fprintf(
+                                                stderr,
+                                                "Invalid read size: %zd\n",
+                                                read_size
+                                        );
+
+                                        close(fd);
+                                        return 1;
+                                }
+
+                                printEvent(&event);
+                        }
+
+                        printStats(fd);
+                }
+
+                pfd.revents = 0;
+        }
+
+        close(fd);
+
+        return 0;
 }
