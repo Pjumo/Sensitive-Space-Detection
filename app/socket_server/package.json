@@ -1,0 +1,13 @@
+{
+  "name": "dashboard-bridge",
+  "version": "0.1.0",
+  "description": "PIR/Radar presence sensor TCP protocol bridge -> REST/WebSocket for web dashboard",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

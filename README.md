@@ -28,7 +28,7 @@
 │   └── sensor_backend/      # UserSpace + Device Driver 공용 추상화 라이브러리
 ├── app/
 │   ├── sensor_agent/        # sensor_agent
-│   └── socket_server/       # C소켓 서버 프로토타입
+│   └── socket_server/       # 센서 TCP 서버 + 웹 대시보드 브릿지 (Node.js, REST/WebSocket)
 ├── tools/
 │   └── demo/                # Radar mock 통합 데모, PIR/Radar 실물 연동 검증
 ├── yocto/                   # Yocto 툴체인으로 리눅스 환경 구성
@@ -57,7 +57,7 @@
 | &Radar 알고리즘 구현 | bridge/algo/ |
 | &빌드 시스템 제작 | build/ |
 | &sensor_agent | app/sensor_agent/ |
-| &C소켓 서버 프로토타입 | app/socket_server/ |
+| &C소켓 서버 프로토타입 → 웹 대시보드 브릿지로 교체 | app/socket_server/ |
 | &Yocto 툴체인으로 리눅스 환경 구성 | yocto/ |
 | *&FRDM-IMX93으로 프로젝트 이전 | docs/porting/ |
 | *&PIR vs Radar | docs/comparison/ |
