@@ -47,7 +47,7 @@ make CC=aarch64-linux-gnu-gcc
 
 HC-SR501은 Repeatable Trigger 모드로 설정되어 있음을 전제로 함
 (움직임 감지 시마다 HIGH 유지 시간이 갱신됨).
-
+```
 PIR OUT이 HIGH로 바뀜 (ASSERTED 이벤트)
 → occupied=false였다면 → true로 전환, 서버에 전송
 
@@ -57,12 +57,12 @@ PIR OUT이 LOW로 떨어짐 (DEASSERTED 이벤트)
 타이머가 도는 중 다시 ASSERTED가 오면 → 타이머 취소
 타이머가 OCCUPANCY_TIMEOUT_SEC(기본 5초)를 넘기면
 → occupied=false로 전환, 서버에 전송
-
+```
 
 `real_backend_wait_read()`는 poll()에 1초 타임아웃을 걸어 반복 호출되며,
 이벤트가 없어도 매초 타이머를 확인하므로 사람이 나간 뒤에도 지연 없이
 occupancy=false 판정이 이루어진다.
-
+​
 ## 서버 전송 메시지 형식
 
 인증 (연결 직후 1회):
