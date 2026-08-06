@@ -67,7 +67,7 @@ occupancy=false 판정이 이루어진다.
 
 인증 (연결 직후 1회):
 
-"<id> <password>"
+"{id} {password}"
 
 응답: `AUTH_OK` 또는 `AUTH_FAIL`
 
