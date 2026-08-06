@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -16,6 +17,7 @@
 #define MAX_PW_LEN 32
 #define MAX_CLIENTS 64
 #define MAX_EVENTS 32
+#define HEARTBEAT_TIMEOUT_SEC 90
 
 struct user_entry {
     char id[MAX_ID_LEN];
@@ -39,6 +41,8 @@ typedef struct {
 
     unsigned char buf[4 + MAX_MSG_SIZE];
     size_t buf_len;
+
+    time_t last_seen;
 } client_t;
 
 static client_t clients[MAX_CLIENTS];
@@ -52,6 +56,7 @@ static int send_framed(int fd, const char *msg);
 static void handle_message(int epfd, client_t *c, const char *data, uint32_t len);
 static void try_process_buffer(int epfd, client_t *c);
 static void handle_client_readable(int epfd, client_t *c);
+static void check_heartbeat_timeouts(int epfd);
 
 int main(int argc, char *argv[])
 {
@@ -114,13 +119,15 @@ int main(int argc, char *argv[])
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
-        int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        int n = epoll_wait(epfd, events, MAX_EVENTS, 5000);
         if (n < 0) {
             if (errno == EINTR)
                 continue;
             perror("epoll_wait 실패");
             break;
         }
+
+        check_heartbeat_timeouts(epfd);
 
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == server_fd) {
@@ -150,6 +157,7 @@ int main(int argc, char *argv[])
                     c->state = STATE_AUTH;
                     c->buf_len = 0;
                     c->id[0] = '\0';
+                    c->last_seen = time(NULL);
                     inet_ntop(AF_INET, &client_addr.sin_addr, c->ip_str, sizeof(c->ip_str));
 
                     struct epoll_event cev;
@@ -212,6 +220,22 @@ static void remove_client(int epfd, client_t *c)
     c->buf_len = 0;
 }
 
+static void check_heartbeat_timeouts(int epfd)
+{
+    time_t now = time(NULL);
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (!clients[i].in_use)
+            continue;
+
+        if (now - clients[i].last_seen >= HEARTBEAT_TIMEOUT_SEC) {
+            printf("[server] fd=%d (id=%s) heartbeat 타임아웃, 연결 강제 종료\n",
+                   clients[i].fd, clients[i].id);
+            remove_client(epfd, &clients[i]);
+        }
+    }
+}
+
 static int send_framed(int fd, const char *msg)
 {
     uint32_t len = (uint32_t)strlen(msg);
@@ -224,8 +248,6 @@ static int send_framed(int fd, const char *msg)
     return 0;
 }
 
-/* 논블로킹 소켓에서 계속 읽어서 client->buf에 쌓고, EAGAIN이 나오면 멈춤.
-   상대방이 끊었으면(-1) 리턴, 정상이면 0 리턴 */
 static void handle_client_readable(int epfd, client_t *c)
 {
     while (1) {
@@ -251,6 +273,7 @@ static void handle_client_readable(int epfd, client_t *c)
         }
 
         c->buf_len += (size_t)r;
+        c->last_seen = time(NULL);
 
         try_process_buffer(epfd, c);
         if (!c->in_use)
@@ -258,8 +281,6 @@ static void handle_client_readable(int epfd, client_t *c)
     }
 }
 
-/* buf 안에 완성된 [길이4바이트 + 본문] 프레임이 있으면 꺼내서 처리하고,
-   처리한 만큼 앞으로 당김. 여러 개 쌓여있으면 반복 처리 */
 static void try_process_buffer(int epfd, client_t *c)
 {
     while (1) {
@@ -277,7 +298,7 @@ static void try_process_buffer(int epfd, client_t *c)
         }
 
         if (c->buf_len < 4 + len)
-            return;   /* 아직 본문이 다 안 옴, 다음 read 기다림 */
+            return;
 
         char msg[MAX_MSG_SIZE + 1];
         memcpy(msg, c->buf + 4, len);
