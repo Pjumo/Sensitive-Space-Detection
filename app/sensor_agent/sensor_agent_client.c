@@ -3,10 +3,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include "mock/mock_backend.h"
+#include "real/real_backend.h"
 
 #define OCCUPANCY_TIMEOUT_SEC 5
 #define MAX_MSG_SIZE 4096
@@ -92,7 +93,7 @@ int main(int argc, char *argv[])
 
     printf("[client] 인증 성공\n");
 
-    if (mock_backend_init() != 0) {
+    if (real_backend_init() != 0) {
         fprintf(stderr, "backend 초기화 실패\n");
         close(sock);
         return 1;
@@ -101,46 +102,57 @@ int main(int argc, char *argv[])
     printf("[client] 재실 감지 시작 (occupancy timeout = %d초)\n", OCCUPANCY_TIMEOUT_SEC);
 
     struct presence_event ev;
-    __u64 last_event_ns = 0;
     int occupied = 0;
+    int waiting_for_timeout = 0;
+    time_t low_since = 0;
 
     while (1) {
-        if (mock_backend_read(&ev) != 0) {
+        int ret = real_backend_wait_read(&ev, 1000);   /* 1초마다 깨어나서 타이머 체크 */
+
+        if (ret < 0) {
             fprintf(stderr, "read 실패\n");
             break;
         }
 
-        if (ev.event_type == PRESENCE_EVENT_ASSERTED) {
-            if (last_event_ns != 0) {
-                __u64 gap_ns = ev.timestamp_ns - last_event_ns;
-                double gap_sec = gap_ns / 1000000000.0;
+        if (ret == 1) {
+            if (ev.event_type == PRESENCE_EVENT_ASSERTED) {
+                waiting_for_timeout = 0;   /* HIGH 다시 옴, 타이머 취소 */
 
-                if (occupied && gap_sec > OCCUPANCY_TIMEOUT_SEC) {
-                    occupied = 0;
-                    printf("[client] >>> 재실 아님으로 전환\n");
+                if (!occupied) {
+                    occupied = 1;
+                    printf("[client] >>> 재실 있음으로 전환\n");
 
                     char status_msg[MAX_MSG_SIZE];
                     snprintf(status_msg, sizeof(status_msg),
-                             "{\"id\":\"%s\",\"occupied\":false}", client_id);
+                             "{\"id\":\"%s\",\"occupied\":true}", client_id);
                     send_msg(sock, status_msg);
                 }
             }
+            else if (ev.event_type == PRESENCE_EVENT_DEASSERTED) {
+                if (occupied) {
+                    waiting_for_timeout = 1;
+                    low_since = time(NULL);   /* LOW로 떨어진 시각부터 타이머 시작 */
+                }
+            }
+        }
 
-            if (!occupied) {
-                occupied = 1;
-                printf("[client] >>> 재실 있음으로 전환\n");
+        if (waiting_for_timeout && occupied) {
+            time_t now = time(NULL);
+            if (now - low_since >= OCCUPANCY_TIMEOUT_SEC) {
+                occupied = 0;
+                waiting_for_timeout = 0;
+                printf("[client] >>> 재실 아님으로 전환 (LOW 후 %ld초 경과)\n",
+                       (long)(now - low_since));
 
                 char status_msg[MAX_MSG_SIZE];
                 snprintf(status_msg, sizeof(status_msg),
-                         "{\"id\":\"%s\",\"occupied\":true}", client_id);
+                         "{\"id\":\"%s\",\"occupied\":false}", client_id);
                 send_msg(sock, status_msg);
             }
-
-            last_event_ns = ev.timestamp_ns;
         }
     }
 
-    mock_backend_close();
+    real_backend_close();
     close(sock);
     return 0;
 }

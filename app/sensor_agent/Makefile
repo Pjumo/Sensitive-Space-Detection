@@ -5,7 +5,7 @@ AGENT_TARGET = sensor_agent
 AGENT_SRCS = sensor_agent.c mock/mock_backend.c
 
 CLIENT_TARGET = sensor_agent_client
-CLIENT_SRCS = sensor_agent_client.c mock/mock_backend.c
+CLIENT_SRCS = sensor_agent_client.c real/real_backend.c
 
 all: $(AGENT_TARGET) $(CLIENT_TARGET)
 
