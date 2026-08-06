@@ -1,23 +1,29 @@
-obj-m += pir_driver.o
+APP = pir_app
+MOD = pir_dev
+OBJ = $(APP).o
+obj-m = $(MOD).o
 
-ccflags-y += -I$(src)/../../../common/include
+CROSS = ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf-
+CC = arm-linux-gnueabihf-gcc
+#KDIR := /lib/modules/$(shell uname -r)/build
+KDIR = /home/ubuntu/pi_bsp/kernel/linux
+PWD = $(shell pwd)
 
-KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD := $(shell pwd)
-DTC ?= dtc
+default:$(OBJ)
+	$(MAKE) -C $(KDIR) M=$(PWD) modules $(CROSS)
+	cp $(MOD).ko /srv/nfs
 
-.PHONY: all module overlay clean
-
-all: module overlay
-
-module:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-overlay:
-	$(DTC) -@ -I dts -O dtb \
-		-o pir-presence.dtbo \
-		pir-presence-overlay.dts
-
+%.o:%.c
+	$(CC) -o $(APP) $<
+	cp $(APP) /srv/nfs
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	$(RM) pir-presence.dtbo
+	rm -rf *.ko
+	rm -rf *.mod.*
+	rm -rf .*.cmd
+	rm -rf *.o
+	rm -rf modules.order
+	rm -rf Module.symvers
+	rm -rf $(MOD).mod
+	rm -rf .tmp_versions
+	rm -rf .module*
+	rm -rf $(APP)

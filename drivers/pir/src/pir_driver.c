@@ -1,571 +1,611 @@
 // SPDX-License-Identifier: GPL-2.0
 
-#include <linux/atomic.h>
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/gpio/consumer.h>
-#include <linux/interrupt.h>
-#include <linux/kfifo.h>
-#include <linux/ktime.h>
-#include <linux/miscdevice.h>
+#include <linux/init.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
-#include <linux/poll.h>
-#include <linux/slab.h>
-#include <linux/spinlock.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/errno.h>
+#include <linux/fcntl.h>
+#include <linux/gpio.h>
 #include <linux/uaccess.h>
+#include <linux/interrupt.h>
+#include <linux/poll.h>
 #include <linux/wait.h>
+#include <linux/spinlock.h>
+#include <linux/atomic.h>
+#include <linux/ktime.h>
 
 #include "presence_uapi.h"
 
-#define PIR_DEVICE_NAME "pir_presence"
-#define PIR_FIFO_DEPTH  64U
+#define PIR_DEV_NAME       "pir_dev"
+#define PIR_DEV_MAJOR      230
+#define PIR_FIFO_DEPTH     32U
 
-struct pir_presence_device {
-    struct device *dev;
-    struct gpio_desc *gpio;
-    int irq;
+/*
+ * 현재 테스트 환경:
+ * gpiochip base 512 + BCM GPIO17 = 529
+ *
+ * 모듈 삽입 시 변경 가능:
+ * sudo insmod pir_dev.ko pir_gpio=529
+ */
+static int pir_gpio = 529;
 
-    struct miscdevice miscdev;
+module_param(pir_gpio, int, 0444);
+MODULE_PARM_DESC(pir_gpio, "HC-SR501 global GPIO number");
 
-    DECLARE_KFIFO_PTR(event_fifo, struct presence_event);
 
-    spinlock_t lock;
-    wait_queue_head_t read_queue;
+struct pir_device_data {
+        int irq;
 
-    atomic_t opened;
-    bool shutting_down;
+        spinlock_t lock;
+        wait_queue_head_t read_wait;
+        atomic_t reader_open;
 
-    __u32 sequence;
-    __u32 last_raw_value;
-    __u64 last_event_timestamp_ns;
+        struct presence_event fifo[PIR_FIFO_DEPTH];
 
-    __u64 total_events;
-    __u64 delivered_events;
-    __u64 dropped_events;
-    __u64 stats_last_timestamp_ns;
+        unsigned int fifo_head;
+        unsigned int fifo_tail;
+        unsigned int fifo_count;
+
+        bool dropped_pending;
+
+        __u32 current_raw;
+        __u32 sequence;
+        __u64 last_timestamp_ns;
+
+        __u64 total_events;
+        __u64 delivered_events;
+        __u64 dropped_events;
+        __u64 stats_last_timestamp_ns;
 };
 
-static bool pir_event_available(struct pir_presence_device *pir)
+
+static struct pir_device_data pir_dev;
+
+
+/* FIFO에 이벤트가 있는지 확인 */
+static bool pirEventAvailable(struct pir_device_data *dev)
 {
-    unsigned long flags;
-    bool available;
-
-    spin_lock_irqsave(&pir->lock, flags);
-    available = !kfifo_is_empty(&pir->event_fifo);
-    spin_unlock_irqrestore(&pir->lock, flags);
-
-    return available;
+        return READ_ONCE(dev->fifo_count) > 0;
 }
 
-static void pir_queue_event(struct pir_presence_device *pir,
-                            struct presence_event *event)
+
+/* 다음 이벤트에 앞선 이벤트 누락 표시 */
+static void pirMarkDroppedLocked(struct pir_device_data *dev)
 {
-    struct presence_event discarded;
-    unsigned long flags;
-    bool queued;
+        dev->dropped_events++;
 
-    spin_lock_irqsave(&pir->lock, flags);
-
-    pir->sequence++;
-    event->sequence = pir->sequence;
-
-    pir->total_events++;
-    pir->last_raw_value = event->raw_value;
-    pir->last_event_timestamp_ns = event->timestamp_ns;
-    pir->stats_last_timestamp_ns = event->timestamp_ns;
-
-    if (kfifo_is_full(&pir->event_fifo)) {
-        if (kfifo_get(&pir->event_fifo, &discarded)) {
-            pir->dropped_events++;
-            event->flags |=
-                PRESENCE_EVENT_FLAG_DROPPED_BEFORE;
+        if(dev->fifo_count > 0)
+        {
+                dev->fifo[dev->fifo_tail].flags |=
+                        PRESENCE_EVENT_FLAG_DROPPED_BEFORE;
         }
-    }
-
-    queued = kfifo_put(&pir->event_fifo, *event);
-
-    if (!queued)
-        pir->dropped_events++;
-
-    spin_unlock_irqrestore(&pir->lock, flags);
-
-    if (queued)
-        wake_up_interruptible(&pir->read_queue);
+        else
+        {
+                dev->dropped_pending = true;
+        }
 }
 
-static irqreturn_t pir_irq_thread(int irq, void *data)
+
+/* GPIO 인터럽트 핸들러 */
+static irqreturn_t pirIntHandler(int irq, void *dev_id)
 {
-    struct pir_presence_device *pir = data;
-    struct presence_event event = {0};
-    int value;
+        struct pir_device_data *dev;
+        struct presence_event event = { 0 };
+        unsigned long flags;
+        __u32 raw_value;
+        __u64 timestamp_ns;
 
-    (void)irq;
+        (void)irq;
 
-    if (READ_ONCE(pir->shutting_down))
+        dev = dev_id;
+
+        raw_value = gpio_get_value(pir_gpio) ? 1U : 0U;
+        timestamp_ns = ktime_get_ns();
+
+        event.api_version = PRESENCE_API_VERSION;
+        event.sensor_type = PRESENCE_SENSOR_PIR;
+
+        if(raw_value == 1U)
+                event.event_type = PRESENCE_EVENT_ASSERTED;
+        else
+                event.event_type = PRESENCE_EVENT_DEASSERTED;
+
+        event.timestamp_ns = timestamp_ns;
+        event.raw_value = raw_value;
+        event.flags = 0;
+
+        spin_lock_irqsave(&dev->lock, flags);
+
+        dev->sequence++;
+        event.sequence = dev->sequence;
+
+        dev->current_raw = raw_value;
+        dev->last_timestamp_ns = timestamp_ns;
+
+        dev->total_events++;
+        dev->stats_last_timestamp_ns = timestamp_ns;
+
+        /*
+         * 이전 read() 실패 등으로 이벤트가 누락됐다면
+         * 다음 이벤트에 플래그를 설정합니다.
+         */
+        if(dev->dropped_pending)
+        {
+                event.flags |=
+                        PRESENCE_EVENT_FLAG_DROPPED_BEFORE;
+
+                dev->dropped_pending = false;
+        }
+
+        /*
+         * FIFO가 가득 찼으면 가장 오래된 이벤트를 버립니다.
+         */
+        if(dev->fifo_count == PIR_FIFO_DEPTH)
+        {
+                dev->fifo_tail =
+                        (dev->fifo_tail + 1U) %
+                        PIR_FIFO_DEPTH;
+
+                dev->fifo_count--;
+                dev->dropped_events++;
+
+                event.flags |=
+                        PRESENCE_EVENT_FLAG_DROPPED_BEFORE;
+        }
+
+        dev->fifo[dev->fifo_head] = event;
+
+        dev->fifo_head =
+                (dev->fifo_head + 1U) %
+                PIR_FIFO_DEPTH;
+
+        dev->fifo_count++;
+
+        spin_unlock_irqrestore(&dev->lock, flags);
+
+        /* poll() 또는 read()에서 대기 중인 앱 깨우기 */
+        wake_up_interruptible(&dev->read_wait);
+
         return IRQ_HANDLED;
-
-    value = gpiod_get_value_cansleep(pir->gpio);
-
-    if (value < 0) {
-        dev_err_ratelimited(
-            pir->dev,
-            "failed to read PIR GPIO: %d\n",
-            value);
-
-        return IRQ_HANDLED;
-    }
-
-    /*
-     * This version reports only rising-edge events.
-     * Ignore the event if the GPIO has already returned LOW.
-     */
-    if (!value)
-        return IRQ_HANDLED;
-
-    event.api_version = PRESENCE_API_VERSION;
-    event.sensor_type = PRESENCE_SENSOR_PIR;
-    event.event_type = PRESENCE_EVENT_ASSERTED;
-    event.timestamp_ns = ktime_get_boottime_ns();
-    event.raw_value = 1U;
-    event.flags = 0U;
-
-    pir_queue_event(pir, &event);
-
-    return IRQ_HANDLED;
 }
 
-static int pir_open(struct inode *inode, struct file *file)
+
+/* /dev/pir_dev open() */
+static int pir_open(struct inode *inode, struct file *filp)
 {
-    struct miscdevice *miscdev = file->private_data;
-    struct pir_presence_device *pir;
-    int ret;
+        /*
+         * PRESENCE_CAP_SINGLE_READER
+         * 한 번에 하나의 앱만 장치를 열 수 있습니다.
+         */
+        if(atomic_cmpxchg(&pir_dev.reader_open, 0, 1) != 0)
+                return -EBUSY;
 
-    pir = container_of(
-        miscdev,
-        struct pir_presence_device,
-        miscdev);
+        filp->private_data = &pir_dev;
 
-    if (READ_ONCE(pir->shutting_down))
-        return -ENODEV;
+        pr_info(
+                "pir_dev: open major=%d minor=%d\n",
+                MAJOR(inode->i_rdev),
+                MINOR(inode->i_rdev)
+        );
 
-    if (atomic_cmpxchg(&pir->opened, 0, 1) != 0)
-        return -EBUSY;
-
-    ret = nonseekable_open(inode, file);
-
-    if (ret) {
-        atomic_set(&pir->opened, 0);
-        return ret;
-    }
-
-    file->private_data = pir;
-
-    return 0;
+        return 0;
 }
 
-static int pir_release(struct inode *inode, struct file *file)
-{
-    struct pir_presence_device *pir = file->private_data;
 
-    (void)inode;
-
-    atomic_set(&pir->opened, 0);
-
-    return 0;
-}
-
-static ssize_t pir_read(struct file *file,
-                        char __user *buffer,
+/* /dev/pir_dev read() */
+static ssize_t pir_read(struct file *filp,
+                        char __user *buf,
                         size_t count,
-                        loff_t *offset)
+                        loff_t *f_pos)
 {
-    struct pir_presence_device *pir = file->private_data;
-    struct presence_event event;
-    unsigned long flags;
-    int ret;
+        struct pir_device_data *dev;
+        struct presence_event event;
+        unsigned long flags;
+        int ret;
 
-    (void)offset;
+        (void)f_pos;
 
-    if (count < sizeof(event))
-        return -EINVAL;
+        dev = filp->private_data;
 
-    for (;;) {
-        spin_lock_irqsave(&pir->lock, flags);
+        if(count < sizeof(event))
+                return -EINVAL;
 
-        if (kfifo_get(&pir->event_fifo, &event)) {
-            spin_unlock_irqrestore(&pir->lock, flags);
-            break;
+        while(1)
+        {
+                spin_lock_irqsave(&dev->lock, flags);
+
+                if(dev->fifo_count > 0)
+                {
+                        event = dev->fifo[dev->fifo_tail];
+
+                        dev->fifo_tail =
+                                (dev->fifo_tail + 1U) %
+                                PIR_FIFO_DEPTH;
+
+                        dev->fifo_count--;
+
+                        spin_unlock_irqrestore(
+                                &dev->lock,
+                                flags
+                        );
+
+                        break;
+                }
+
+                spin_unlock_irqrestore(&dev->lock, flags);
+
+                /*
+                 * O_NONBLOCK으로 열었다면
+                 * 이벤트가 없을 때 즉시 반환합니다.
+                 */
+                if(filp->f_flags & O_NONBLOCK)
+                        return -EAGAIN;
+
+                ret = wait_event_interruptible(
+                        dev->read_wait,
+                        pirEventAvailable(dev)
+                );
+
+                if(ret != 0)
+                        return ret;
         }
 
-        if (pir->shutting_down) {
-            spin_unlock_irqrestore(&pir->lock, flags);
-            return -ENODEV;
+        if(copy_to_user(buf, &event, sizeof(event)) != 0)
+        {
+                spin_lock_irqsave(&dev->lock, flags);
+
+                pirMarkDroppedLocked(dev);
+
+                spin_unlock_irqrestore(&dev->lock, flags);
+
+                return -EFAULT;
         }
 
-        spin_unlock_irqrestore(&pir->lock, flags);
+        spin_lock_irqsave(&dev->lock, flags);
 
-        if (file->f_flags & O_NONBLOCK)
-            return -EAGAIN;
+        dev->delivered_events++;
 
-        ret = wait_event_interruptible(
-            pir->read_queue,
-            READ_ONCE(pir->shutting_down) ||
-            pir_event_available(pir));
+        spin_unlock_irqrestore(&dev->lock, flags);
 
-        if (ret)
-            return ret;
-    }
-
-    if (copy_to_user(buffer, &event, sizeof(event))) {
-        spin_lock_irqsave(&pir->lock, flags);
-        pir->dropped_events++;
-        spin_unlock_irqrestore(&pir->lock, flags);
-
-        return -EFAULT;
-    }
-
-    spin_lock_irqsave(&pir->lock, flags);
-    pir->delivered_events++;
-    spin_unlock_irqrestore(&pir->lock, flags);
-
-    return sizeof(event);
+        return sizeof(event);
 }
 
-static __poll_t pir_poll(struct file *file,
+
+/* poll(), select(), epoll() 지원 */
+static __poll_t pir_poll(struct file *filp,
                          struct poll_table_struct *wait)
 {
-    struct pir_presence_device *pir = file->private_data;
-    __poll_t mask = 0;
+        struct pir_device_data *dev;
+        __poll_t mask = 0;
 
-    poll_wait(file, &pir->read_queue, wait);
+        dev = filp->private_data;
 
-    if (pir_event_available(pir))
-        mask |= EPOLLIN | EPOLLRDNORM;
+        poll_wait(filp, &dev->read_wait, wait);
 
-    if (READ_ONCE(pir->shutting_down))
-        mask |= EPOLLERR | EPOLLHUP;
+        if(pirEventAvailable(dev))
+                mask |= EPOLLIN | EPOLLRDNORM;
 
-    return mask;
+        return mask;
 }
 
-static long pir_ioctl(struct file *file,
-                      unsigned int command,
-                      unsigned long argument)
+
+/* ioctl 처리 */
+static long pir_ioctl(struct file *filp,
+                      unsigned int cmd,
+                      unsigned long arg)
 {
-    struct pir_presence_device *pir = file->private_data;
-    void __user *argument_pointer =
-        (void __user *)argument;
-    unsigned long flags;
+        struct pir_device_data *dev;
+        struct presence_caps caps = { 0 };
+        struct presence_state state = { 0 };
+        struct presence_stats stats = { 0 };
 
-    if (READ_ONCE(pir->shutting_down))
-        return -ENODEV;
+        void __user *argp;
+        unsigned long flags;
+        __u32 version;
 
-    switch (command) {
-    case PRESENCE_IOC_GET_API_VERSION: {
-        __u32 version = PRESENCE_API_VERSION;
+        dev = filp->private_data;
+        argp = (void __user *)arg;
 
-        if (copy_to_user(
-                argument_pointer,
-                &version,
-                sizeof(version)))
-            return -EFAULT;
+        if(_IOC_TYPE(cmd) != PRESENCE_IOC_MAGIC)
+                return -ENOTTY;
 
-        return 0;
-    }
+        switch(cmd)
+        {
+        case PRESENCE_IOC_GET_API_VERSION:
 
-    case PRESENCE_IOC_GET_CAPS: {
-        struct presence_caps caps = {
-            .api_version = PRESENCE_API_VERSION,
-            .sensor_type = PRESENCE_SENSOR_PIR,
+                version = PRESENCE_API_VERSION;
 
-            .capability_flags =
-                PRESENCE_CAP_READ |
-                PRESENCE_CAP_POLL |
-                PRESENCE_CAP_CURRENT_STATE |
-                PRESENCE_CAP_STATS |
-                PRESENCE_CAP_RISING_EDGE |
-                PRESENCE_CAP_SINGLE_READER,
+                if(copy_to_user(
+                        argp,
+                        &version,
+                        sizeof(version)) != 0)
+                {
+                        return -EFAULT;
+                }
 
-            .event_size =
-                sizeof(struct presence_event),
+                return 0;
 
-            .fifo_depth = PIR_FIFO_DEPTH,
-        };
 
-        if (copy_to_user(
-                argument_pointer,
-                &caps,
-                sizeof(caps)))
-            return -EFAULT;
+        case PRESENCE_IOC_GET_CAPS:
 
-        return 0;
-    }
+                caps.api_version = PRESENCE_API_VERSION;
+                caps.sensor_type = PRESENCE_SENSOR_PIR;
 
-    case PRESENCE_IOC_GET_STATE: {
-        struct presence_state state = {0};
-        int value;
+                caps.capability_flags =
+                        PRESENCE_CAP_READ |
+                        PRESENCE_CAP_POLL |
+                        PRESENCE_CAP_CURRENT_STATE |
+                        PRESENCE_CAP_STATS |
+                        PRESENCE_CAP_RISING_EDGE |
+                        PRESENCE_CAP_SINGLE_READER;
 
-        value = gpiod_get_value_cansleep(pir->gpio);
+                caps.event_size =
+                        (__u32)sizeof(struct presence_event);
 
-        if (value < 0)
-            return value;
+                caps.fifo_depth = PIR_FIFO_DEPTH;
 
-        state.api_version = PRESENCE_API_VERSION;
-        state.sensor_type = PRESENCE_SENSOR_PIR;
-        state.raw_value = value ? 1U : 0U;
+                if(copy_to_user(
+                        argp,
+                        &caps,
+                        sizeof(caps)) != 0)
+                {
+                        return -EFAULT;
+                }
 
-        spin_lock_irqsave(&pir->lock, flags);
+                return 0;
 
-        state.sequence = pir->sequence;
-        state.last_timestamp_ns =
-            pir->last_event_timestamp_ns;
 
-        spin_unlock_irqrestore(&pir->lock, flags);
+        case PRESENCE_IOC_GET_STATE:
 
-        if (copy_to_user(
-                argument_pointer,
-                &state,
-                sizeof(state)))
-            return -EFAULT;
+                spin_lock_irqsave(&dev->lock, flags);
 
-        return 0;
-    }
+                state.api_version =
+                        PRESENCE_API_VERSION;
 
-    case PRESENCE_IOC_GET_STATS: {
-        struct presence_stats stats = {0};
+                state.sensor_type =
+                        PRESENCE_SENSOR_PIR;
 
-        stats.api_version = PRESENCE_API_VERSION;
+                state.raw_value =
+                        dev->current_raw;
 
-        spin_lock_irqsave(&pir->lock, flags);
+                state.sequence =
+                        dev->sequence;
 
-        stats.total_events =
-            pir->total_events;
+                state.last_timestamp_ns =
+                        dev->last_timestamp_ns;
 
-        stats.delivered_events =
-            pir->delivered_events;
+                spin_unlock_irqrestore(
+                        &dev->lock,
+                        flags
+                );
 
-        stats.dropped_events =
-            pir->dropped_events;
+                if(copy_to_user(
+                        argp,
+                        &state,
+                        sizeof(state)) != 0)
+                {
+                        return -EFAULT;
+                }
 
-        stats.last_timestamp_ns =
-            pir->stats_last_timestamp_ns;
+                return 0;
 
-        spin_unlock_irqrestore(&pir->lock, flags);
 
-        if (copy_to_user(
-                argument_pointer,
-                &stats,
-                sizeof(stats)))
-            return -EFAULT;
+        case PRESENCE_IOC_GET_STATS:
 
-        return 0;
-    }
+                spin_lock_irqsave(&dev->lock, flags);
 
-    case PRESENCE_IOC_CLEAR_STATS:
-        spin_lock_irqsave(&pir->lock, flags);
+                stats.total_events =
+                        dev->total_events;
 
-        pir->total_events = 0;
-        pir->delivered_events = 0;
-        pir->dropped_events = 0;
-        pir->stats_last_timestamp_ns = 0;
+                stats.delivered_events =
+                        dev->delivered_events;
 
-        spin_unlock_irqrestore(&pir->lock, flags);
+                stats.dropped_events =
+                        dev->dropped_events;
 
-        return 0;
+                stats.last_timestamp_ns =
+                        dev->stats_last_timestamp_ns;
 
-    default:
-        return -ENOTTY;
-    }
+                stats.api_version =
+                        PRESENCE_API_VERSION;
+
+                spin_unlock_irqrestore(
+                        &dev->lock,
+                        flags
+                );
+
+                if(copy_to_user(
+                        argp,
+                        &stats,
+                        sizeof(stats)) != 0)
+                {
+                        return -EFAULT;
+                }
+
+                return 0;
+
+
+        case PRESENCE_IOC_CLEAR_STATS:
+
+                spin_lock_irqsave(&dev->lock, flags);
+
+                dev->total_events = 0;
+                dev->delivered_events = 0;
+                dev->dropped_events = 0;
+                dev->stats_last_timestamp_ns = 0;
+
+                spin_unlock_irqrestore(
+                        &dev->lock,
+                        flags
+                );
+
+                return 0;
+
+
+        default:
+                return -ENOTTY;
+        }
 }
 
-static const struct file_operations pir_file_operations = {
-    .owner = THIS_MODULE,
-    .open = pir_open,
-    .release = pir_release,
-    .read = pir_read,
-    .poll = pir_poll,
-    .unlocked_ioctl = pir_ioctl,
+
+/* /dev/pir_dev close() */
+static int pir_release(struct inode *inode,
+                       struct file *filp)
+{
+        (void)inode;
+        (void)filp;
+
+        atomic_set(&pir_dev.reader_open, 0);
+
+        pr_info("pir_dev: release\n");
+
+        return 0;
+}
+
+
+static const struct file_operations pir_fops = {
+        .owner          = THIS_MODULE,
+        .open           = pir_open,
+        .read           = pir_read,
+        .poll           = pir_poll,
+        .unlocked_ioctl = pir_ioctl,
+        .release        = pir_release,
 };
 
-static int pir_probe(struct platform_device *platform_device)
+
+/* 모듈 삽입 */
+static int __init pir_module_init(void)
 {
-    struct device *dev = &platform_device->dev;
-    struct pir_presence_device *pir;
-    int initial_value;
-    int ret;
+        int ret;
 
-    pir = devm_kzalloc(
-        dev,
-        sizeof(*pir),
-        GFP_KERNEL);
+        pr_info("pir_dev: module init\n");
 
-    if (!pir)
-        return -ENOMEM;
+        spin_lock_init(&pir_dev.lock);
+        init_waitqueue_head(&pir_dev.read_wait);
+        atomic_set(&pir_dev.reader_open, 0);
 
-    pir->dev = dev;
+        pir_dev.fifo_head = 0;
+        pir_dev.fifo_tail = 0;
+        pir_dev.fifo_count = 0;
+        pir_dev.dropped_pending = false;
 
-    spin_lock_init(&pir->lock);
-    init_waitqueue_head(&pir->read_queue);
-    atomic_set(&pir->opened, 0);
+        ret = gpio_request(pir_gpio, PIR_DEV_NAME);
+        if(ret < 0)
+        {
+                pr_err(
+                        "pir_dev: gpio_request(%d) failed: %d\n",
+                        pir_gpio,
+                        ret
+                );
 
-    ret = kfifo_alloc(
-        &pir->event_fifo,
-        PIR_FIFO_DEPTH,
-        GFP_KERNEL);
+                return ret;
+        }
 
-    if (ret) {
-        return dev_err_probe(
-            dev,
-            ret,
-            "failed to allocate event FIFO\n");
-    }
+        ret = gpio_direction_input(pir_gpio);
+        if(ret < 0)
+        {
+                pr_err(
+                        "pir_dev: gpio_direction_input failed: %d\n",
+                        ret
+                );
 
-    pir->gpio = devm_gpiod_get(
-        dev,
-        "pir",
-        GPIOD_IN);
+                goto error_gpio;
+        }
 
-    if (IS_ERR(pir->gpio)) {
-        ret = PTR_ERR(pir->gpio);
+        pir_dev.current_raw =
+                gpio_get_value(pir_gpio) ? 1U : 0U;
 
-        dev_err_probe(
-            dev,
-            ret,
-            "failed to acquire pir-gpios\n");
+        pir_dev.irq = gpio_to_irq(pir_gpio);
+        if(pir_dev.irq < 0)
+        {
+                ret = pir_dev.irq;
 
-        goto error_free_fifo;
-    }
+                pr_err(
+                        "pir_dev: gpio_to_irq failed: %d\n",
+                        ret
+                );
 
-    initial_value =
-        gpiod_get_value_cansleep(pir->gpio);
+                goto error_gpio;
+        }
 
-    if (initial_value < 0) {
-        ret = initial_value;
+        ret = request_irq(
+                pir_dev.irq,
+                pirIntHandler,
+                IRQF_TRIGGER_RISING |
+                IRQF_TRIGGER_FALLING,
+                PIR_DEV_NAME,
+                &pir_dev
+        );
 
-        dev_err_probe(
-            dev,
-            ret,
-            "failed to read initial GPIO state\n");
+        if(ret < 0)
+        {
+                pr_err(
+                        "pir_dev: request_irq failed: %d\n",
+                        ret
+                );
 
-        goto error_free_fifo;
-    }
+                goto error_gpio;
+        }
 
-    pir->last_raw_value =
-        initial_value ? 1U : 0U;
+        ret = register_chrdev(
+                PIR_DEV_MAJOR,
+                PIR_DEV_NAME,
+                &pir_fops
+        );
 
-    pir->irq = gpiod_to_irq(pir->gpio);
+        if(ret < 0)
+        {
+                pr_err(
+                        "pir_dev: register_chrdev failed: %d\n",
+                        ret
+                );
 
-    if (pir->irq < 0) {
-        ret = pir->irq;
+                goto error_irq;
+        }
 
-        dev_err_probe(
-            dev,
-            ret,
-            "failed to convert GPIO to IRQ\n");
+        pr_info(
+                "pir_dev: ready major=%d gpio=%d irq=%d\n",
+                PIR_DEV_MAJOR,
+                pir_gpio,
+                pir_dev.irq
+        );
 
-        goto error_free_fifo;
-    }
+        return 0;
 
-    platform_set_drvdata(
-        platform_device,
-        pir);
 
-    ret = devm_request_threaded_irq(
-        dev,
-        pir->irq,
-        NULL,
-        pir_irq_thread,
-        IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-        PIR_DEVICE_NAME,
-        pir);
+error_irq:
+        free_irq(pir_dev.irq, &pir_dev);
 
-    if (ret) {
-        dev_err_probe(
-            dev,
-            ret,
-            "failed to request IRQ %d\n",
-            pir->irq);
+error_gpio:
+        gpio_free(pir_gpio);
 
-        goto error_free_fifo;
-    }
-
-    pir->miscdev.minor = MISC_DYNAMIC_MINOR;
-    pir->miscdev.name = PIR_DEVICE_NAME;
-    pir->miscdev.fops = &pir_file_operations;
-    pir->miscdev.parent = dev;
-    pir->miscdev.mode = 0444;
-
-    ret = misc_register(&pir->miscdev);
-
-    if (ret) {
-        dev_err_probe(
-            dev,
-            ret,
-            "failed to register misc device\n");
-
-        goto error_free_fifo;
-    }
-
-    dev_info(
-        dev,
-        "registered /dev/%s, IRQ=%d, initial GPIO=%u\n",
-        PIR_DEVICE_NAME,
-        pir->irq,
-        pir->last_raw_value);
-
-    return 0;
-
-error_free_fifo:
-    kfifo_free(&pir->event_fifo);
-
-    return ret;
+        return ret;
 }
 
-static void pir_remove(
-    struct platform_device *platform_device)
+
+/* 모듈 제거 */
+static void __exit pir_module_exit(void)
 {
-    struct pir_presence_device *pir =
-        platform_get_drvdata(platform_device);
+        unregister_chrdev(
+                PIR_DEV_MAJOR,
+                PIR_DEV_NAME
+        );
 
-    WRITE_ONCE(pir->shutting_down, true);
+        free_irq(
+                pir_dev.irq,
+                &pir_dev
+        );
 
-    disable_irq(pir->irq);
-    misc_deregister(&pir->miscdev);
+        gpio_free(pir_gpio);
 
-    wake_up_interruptible(&pir->read_queue);
-
-    kfifo_free(&pir->event_fifo);
-
-    dev_info(
-        &platform_device->dev,
-        "PIR presence driver removed\n");
+        pr_info("pir_dev: module exit\n");
 }
 
-static const struct of_device_id pir_of_match[] = {
-    {
-        .compatible = "project,pir-presence",
-    },
-    {}
-};
 
-MODULE_DEVICE_TABLE(of, pir_of_match);
+module_init(pir_module_init);
+module_exit(pir_module_exit);
 
-static struct platform_driver pir_platform_driver = {
-    .probe = pir_probe,
-    .remove = pir_remove,
-
-    .driver = {
-        .name = PIR_DEVICE_NAME,
-        .of_match_table = pir_of_match,
-    },
-};
-
-module_platform_driver(pir_platform_driver);
-
+MODULE_AUTHOR("ygy");
+MODULE_DESCRIPTION("HC-SR501 presence event driver");
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Sensitive Space Detection Team");
-MODULE_DESCRIPTION("PIR GPIO presence event driver");
-MODULE_VERSION("1.0");
-
