@@ -1,5 +1,7 @@
 # Presence UAPI
 
+### 아직 임시로 헤더 파일 구성한거라 이후 통일되게 수정이 필요함
+
 ## 1. 개요
 
 `presence_uapi.h`는 커널 드라이버(Kernel Driver)와 사용자 프로그램(User Application)이
