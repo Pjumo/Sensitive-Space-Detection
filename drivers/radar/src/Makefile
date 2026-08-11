@@ -1,7 +1,7 @@
 obj-m += radar_mock_drv.o
 
-# 공통 헤더(presence_uapi.h) 경로. 실제 프로젝트 구조에 맞게 조정하세요.
-ccflags-y += -I$(src)/../../../common/include
+# presence_uapi.h가 같은 디렉토리(drivers/radar/mock/)에 있으므로
+# 별도 -I 경로 지정 불필요 (큰따옴표 include는 소스 디렉토리를 기본 탐색)
 
 # 기본값: Pi 로컬 빌드 (헤더가 apt로 설치되어 있는 경우)
 KDIR ?= /lib/modules/$(shell uname -r)/build
